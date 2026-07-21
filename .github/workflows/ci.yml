@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  # Static analysis + offline unit tests on all three target platforms.
+  test:
+    name: analyze & test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dart-lang/setup-dart@v1
+      - run: dart pub get
+      - run: dart analyze --fatal-infos
+      - run: dart test
+
+  # Exercises the real kernel TUN device end to end. This is the only thing that
+  # validates the FFI layer (socket/ioctl/struct layouts, and on macOS utun's
+  # 4-byte address-family prefix) -- a unit test can only prove it compiles.
+  #
+  # No VPN server involved: we route a dummy prefix into the interface, ping it,
+  # answer the kernel's ICMP echo request ourselves, and require ping to succeed.
+  # GitHub's Linux and macOS runners both grant passwordless sudo, which is what
+  # creating a TUN/utun device needs.
+  device:
+    name: TUN device round-trip (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dart-lang/setup-dart@v1
+      - run: dart pub get
+
+      - name: Ensure the tun module is loaded
+        if: runner.os == 'Linux'
+        run: sudo modprobe tun && test -c /dev/net/tun
+
+      # Compile first, then run the binary under sudo: `sudo dart run` would not
+      # see the pub cache (sudo resets HOME).
+      - name: Build the device check
+        run: dart compile exe tool/tun_loopback_check.dart -o tun_check
+
+      - name: Round-trip a packet through the real device
+        run: sudo ./tun_check

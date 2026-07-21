@@ -1,0 +1,20 @@
+# Dart / pub
+.dart_tool/
+.packages
+build/
+doc/api/
+
+# Compiled binaries (`dart compile exe`)
+sstp
+sstp.exe
+tun_check
+*.exe
+
+# Wintun runtime dependency — download the signed build from wintun.net
+wintun.dll
+
+# Editor / OS
+.idea/
+.vscode/
+*.iml
+.DS_Store
