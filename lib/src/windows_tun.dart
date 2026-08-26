@@ -212,6 +212,16 @@ class WindowsTunBackend implements TunnelBackend {
     }
 
     // 2) NRPT catch-all so no lookup leaks to the physical resolver.
+    //
+    // Clear ours first. This rule is the one thing here that outlives the
+    // process: the routes are `store=active` and the adapter dies with us, but
+    // NRPT is persisted in the registry
+    // (…\Services\Dnscache\Parameters\DnsPolicyConfig), so a run that was
+    // killed rather than closed left one behind — and it is still pointing the
+    // whole machine at a resolver that went away with that tunnel. Adding a
+    // second on top would stack two catch-alls of unclear precedence.
+    await Process.run('powershell', _nrptRemoveArgs);
+
     final add = await Process.run('powershell', [
       '-NoProfile', '-NonInteractive', '-Command',
       "Add-DnsClientNrptRule -Namespace '.' -NameServers '$dns' "
@@ -222,12 +232,18 @@ class WindowsTunBackend implements TunnelBackend {
       return;
     }
     log.debug('TUN', 'NRPT catch-all => $dns');
-    _undo.add(_Undo('powershell', [
-      '-NoProfile', '-NonInteractive', '-Command',
-      "Get-DnsClientNrptRule | Where-Object { \$_.Comment -eq '$_nrptTag' } | "
-          "Remove-DnsClientNrptRule -Force",
-    ], 'remove NRPT rule'));
+    _undo.add(_Undo('powershell', _nrptRemoveArgs, 'remove NRPT rule'));
   }
+
+  /// Deletes every NRPT rule stamped with [_nrptTag] — the teardown of the rule
+  /// added above, and the pre-emptive clear of one an earlier run leaked.
+  /// Matching on the comment is what keeps it from touching a rule the user set
+  /// themselves.
+  static const List<String> _nrptRemoveArgs = [
+    '-NoProfile', '-NonInteractive', '-Command',
+    "Get-DnsClientNrptRule | Where-Object { \$_.Comment -eq '$_nrptTag' } | "
+        "Remove-DnsClientNrptRule -Force",
+  ];
 
   /// Adds an on-link route through the tunnel adapter (no nexthop => on-link,
   /// correct for a point-to-point tunnel).
