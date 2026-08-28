@@ -198,7 +198,7 @@ class WindowsTunBackend implements TunnelBackend {
     // a public resolver, which the /1 routes above also send over the tunnel.
     final dns = (config.dns != null && config.dns!.isNotEmpty)
         ? config.dns!
-        : '1.1.1.1';
+        : _publicResolvers.first;
 
     // 1) Adapter DNS. The adapter is removed on close, so no undo is needed.
     final setDns = await Process.run('netsh', [
@@ -222,18 +222,40 @@ class WindowsTunBackend implements TunnelBackend {
     // second on top would stack two catch-alls of unclear precedence.
     await Process.run('powershell', _nrptRemoveArgs);
 
+    // Public resolvers here, deliberately, even when the server proposed one.
+    //
+    // This rule is the piece that can outlive the process, and what it names
+    // decides how bad that is. A server-proposed resolver is typically a
+    // private address inside that VPN: perfect while the tunnel is up, and
+    // unreachable the moment it is not — so a rule left behind by a crash or a
+    // power cut points the whole machine at an address that no longer answers,
+    // and nothing resolves until someone clears it.
+    //
+    // A public resolver survives that: the leftover still works, so the failure
+    // degrades from "no internet" to "DNS goes to Cloudflare". Nothing is given
+    // up while connected, because the /1 routes carry these queries through the
+    // tunnel like any other traffic — only the VPN's own internal names become
+    // unresolvable, which public relays do not serve anyway.
+    //
+    // Two of them, so one being blocked (which is the norm on the networks this
+    // client exists for) is not the same as having no resolver at all.
+    final nrptServers = _publicResolvers.map((s) => "'$s'").join(',');
     final add = await Process.run('powershell', [
       '-NoProfile', '-NonInteractive', '-Command',
-      "Add-DnsClientNrptRule -Namespace '.' -NameServers '$dns' "
+      "Add-DnsClientNrptRule -Namespace '.' -NameServers $nrptServers "
           "-Comment '$_nrptTag'",
     ]);
     if (add.exitCode != 0) {
       log.warn('TUN', 'could not add NRPT rule: ${_msg(add).trim()}');
       return;
     }
-    log.debug('TUN', 'NRPT catch-all => $dns');
+    log.debug('TUN', 'NRPT catch-all => ${_publicResolvers.join(", ")}');
     _undo.add(_Undo('powershell', _nrptRemoveArgs, 'remove NRPT rule'));
   }
+
+  /// Resolvers that answer from anywhere, tunnel or no tunnel. See [_applyDns]
+  /// for why the NRPT rule must not name a tunnel-only address.
+  static const List<String> _publicResolvers = ['1.1.1.1', '8.8.8.8'];
 
   /// Deletes every NRPT rule stamped with [_nrptTag] — the teardown of the rule
   /// added above, and the pre-emptive clear of one an earlier run leaked.
