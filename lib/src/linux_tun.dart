@@ -6,6 +6,7 @@ import 'dart:typed_data';
 import 'package:ffi/ffi.dart';
 
 import 'libc.dart';
+import 'linux_dns.dart';
 import 'logging.dart';
 import 'tun_reader.dart';
 import 'tunnel_backend.dart';
@@ -31,7 +32,7 @@ class LinuxTunBackend implements TunnelBackend {
   String _ifName = 'tun0';
 
   // Reverse operations to undo on close(), applied in LIFO order. Each entry is
-  // an `ip` argument list plus a human label.
+  // a command's argument list plus a human label.
   final List<_Undo> _undo = [];
 
   final _inbound = StreamController<Uint8List>.broadcast();
@@ -160,6 +161,7 @@ class LinuxTunBackend implements TunnelBackend {
       await _ip(['route', 'add', '128.0.0.0/1', 'dev', _ifName],
           undo: ['route', 'del', '128.0.0.0/1', 'dev', _ifName],
           label: 'default half 128.0.0.0/1 via tunnel');
+      await _routeDnsThroughTunnel();
     } else {
       if (config.splitCidrs.isEmpty) {
         log.warn('TUN',
@@ -170,6 +172,38 @@ class LinuxTunBackend implements TunnelBackend {
             undo: ['route', 'del', cidr, 'dev', _ifName],
             label: 'split route $cidr via tunnel');
       }
+    }
+  }
+
+  /// Points systemd-resolved at the tunnel. Traffic already flows without it,
+  /// so a failure is warned about and never ends the connection.
+  Future<void> _routeDnsThroughTunnel() async {
+    for (final step in resolvectlSteps(_ifName)) {
+      log.debug('DNS', 'resolvectl ${step.join(' ')}');
+      final ProcessResult r;
+      try {
+        r = await Process.run('resolvectl', step);
+      } on ProcessException {
+        log.warn('DNS',
+            'DNS is NOT going through the VPN: systemd-resolved is not installed.');
+        return;
+      }
+      if (r.exitCode != 0) {
+        log.warn('DNS', dnsFailureAdvice((r.stderr as String).trim()));
+        return;
+      }
+    }
+    _undo.add(_Undo(resolvectlRevert(_ifName), 'restore DNS',
+        command: 'resolvectl'));
+    log.info('DNS',
+        'resolver set to ${linuxTunnelResolvers.join(', ')} via $_ifName');
+
+    try {
+      final warning = dnsBypassWarning(
+          await File('/etc/resolv.conf').readAsString());
+      if (warning != null) log.warn('DNS', warning);
+    } on FileSystemException catch (e) {
+      log.debug('DNS', 'could not read /etc/resolv.conf: ${e.message}');
     }
   }
 
@@ -199,7 +233,7 @@ class LinuxTunBackend implements TunnelBackend {
 
     // Revert routing/address changes in reverse order; tolerate failures.
     for (final u in _undo.reversed) {
-      final r = await Process.run('ip', u.args);
+      final r = await Process.run(u.command, u.args);
       if (r.exitCode != 0) {
         log.debug('TUN',
             'undo "${u.label}" exited ${r.exitCode}: ${(r.stderr as String).trim()}');
@@ -260,9 +294,10 @@ class LinuxTunBackend implements TunnelBackend {
 }
 
 class _Undo {
+  final String command;
   final List<String> args;
   final String label;
-  _Undo(this.args, this.label);
+  _Undo(this.args, this.label, {this.command = 'ip'});
 }
 
 class _DefaultRoute {

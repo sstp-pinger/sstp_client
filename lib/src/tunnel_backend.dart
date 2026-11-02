@@ -28,7 +28,8 @@ class TunnelConfig {
 
   /// IPCP-assigned DNS server, if any. The Windows backend applies it (adapter
   /// DNS + an NRPT catch-all) so lookups resolve through the tunnel instead of
-  /// the physical/ISP resolver. Linux/macOS do not yet apply it.
+  /// the physical/ISP resolver. Linux ignores it and uses public resolvers
+  /// through the tunnel (see linux_dns.dart); macOS does not apply DNS yet.
   final String? dns;
 
   /// Desired interface name (e.g. "tun0"). The backend may adjust it if taken.
