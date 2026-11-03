@@ -8,6 +8,7 @@ import 'package:ffi/ffi.dart';
 import 'libc.dart';
 import 'linux_dns.dart';
 import 'logging.dart';
+import 'teardown_plan.dart';
 import 'tun_reader.dart';
 import 'tunnel_backend.dart';
 
@@ -44,7 +45,11 @@ class LinuxTunBackend implements TunnelBackend {
 
   bool _closed = false;
 
-  LinuxTunBackend({required this.log});
+  /// Called with what is left to undo after every change, so the tunnel can be
+  /// taken down even if this isolate is killed. See [TeardownPlan].
+  final void Function(TeardownPlan plan)? onTeardownPlan;
+
+  LinuxTunBackend({required this.log, this.onTeardownPlan});
 
   @override
   String get interfaceName => _ifName;
@@ -56,6 +61,7 @@ class LinuxTunBackend implements TunnelBackend {
   Future<void> open(TunnelConfig config) async {
     _ifName = config.interfaceName;
     _createDevice(_ifName);
+    _publishPlan();
     log.info('TUN', 'created interface $_ifName (fd=$_fd)');
 
     // Start the reader before routing so no inbound packet is missed.
@@ -195,6 +201,7 @@ class LinuxTunBackend implements TunnelBackend {
     }
     _undo.add(_Undo(resolvectlRevert(_ifName), 'restore DNS',
         command: 'resolvectl'));
+    _publishPlan();
     log.info('DNS',
         'resolver set to ${linuxTunnelResolvers.join(', ')} via $_ifName');
 
@@ -231,8 +238,10 @@ class LinuxTunBackend implements TunnelBackend {
 
     await _reader?.stop();
 
-    // Revert routing/address changes in reverse order; tolerate failures.
-    for (final u in _undo.reversed) {
+    // Revert routing/address changes in reverse order; tolerate failures. A
+    // command leaves the plan only once it has run.
+    while (_undo.isNotEmpty) {
+      final u = _undo.last;
       final r = await Process.run(u.command, u.args);
       if (r.exitCode != 0) {
         log.debug('TUN',
@@ -240,13 +249,18 @@ class LinuxTunBackend implements TunnelBackend {
       } else {
         log.debug('TUN', 'reverted: ${u.label}');
       }
+      _undo.removeLast();
+      _publishPlan();
     }
-    _undo.clear();
 
-    // Closing the fd removes the (non-persistent) interface.
+    // Closing the fd removes the (non-persistent) interface. It leaves the
+    // plan in the same synchronous step, so a kill never leaves it named there
+    // after it was closed (and possibly reused).
     if (_fd >= 0) {
-      _libc.close(_fd);
+      final fd = _fd;
       _fd = -1;
+      _publishPlan();
+      _libc.close(fd);
     }
     if (_writeBuf != null) {
       calloc.free(_writeBuf!);
@@ -270,8 +284,18 @@ class LinuxTunBackend implements TunnelBackend {
       }
       throw TunnelException('ip ${args.join(' ')} failed: $err');
     }
-    if (undo != null) _undo.add(_Undo(undo, label));
+    if (undo != null) {
+      _undo.add(_Undo(undo, label));
+      _publishPlan();
+    }
   }
+
+  void _publishPlan() => onTeardownPlan?.call(TeardownPlan(
+        commands: [
+          for (final u in _undo) TeardownCommand(u.command, u.args, u.label),
+        ],
+        tunFd: _fd >= 0 ? _fd : null,
+      ));
 
   Future<_DefaultRoute?> _defaultRoute() async {
     final r = await Process.run('ip', ['-o', 'route', 'show', 'default']);

@@ -12,6 +12,8 @@ export 'src/tunnel_backend.dart'
         RouteMode,
         TunnelException,
         TunnelPermissionException;
+export 'src/teardown_plan.dart'
+    show TeardownPlan, TeardownCommand, runTeardownPlan;
 export 'src/linux_tun.dart' show LinuxTunBackend;
 export 'src/windows_tun.dart'
     show WindowsTunBackend, parseWindowsDefaultRoute, WindowsDefaultRoute;

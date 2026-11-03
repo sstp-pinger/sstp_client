@@ -6,6 +6,7 @@ import 'dart:typed_data';
 import 'package:ffi/ffi.dart';
 
 import 'logging.dart';
+import 'teardown_plan.dart';
 import 'tunnel_backend.dart';
 import 'wintun.dart';
 import 'wintun_reader.dart';
@@ -33,7 +34,11 @@ class WindowsTunBackend implements TunnelBackend {
   String _ifName = 'tun0';
 
   // Reverse operations to undo on close(), applied in LIFO order.
-  final List<_Undo> _undo = [];
+  final List<TeardownCommand> _undo = [];
+
+  /// Called with what is left to undo after every change, so the tunnel can be
+  /// taken down even if this isolate is killed. See [TeardownPlan].
+  final void Function(TeardownPlan plan)? onTeardownPlan;
 
   /// Comment stamped on our NRPT rule so teardown can find and remove exactly
   /// the rule we added, without disturbing any the user set themselves.
@@ -44,7 +49,11 @@ class WindowsTunBackend implements TunnelBackend {
 
   bool _closed = false;
 
-  WindowsTunBackend({required this.log, this.dllPath = 'wintun.dll'});
+  WindowsTunBackend({
+    required this.log,
+    this.dllPath = 'wintun.dll',
+    this.onTeardownPlan,
+  });
 
   @override
   String get interfaceName => _ifName;
@@ -56,6 +65,7 @@ class WindowsTunBackend implements TunnelBackend {
   Future<void> open(TunnelConfig config) async {
     _ifName = config.interfaceName;
     _createAdapter(_ifName);
+    _publishPlan();
     log.info('TUN', 'created Wintun adapter "$_ifName"');
 
     // Start the session and reader before routing so no inbound packet is lost.
@@ -67,6 +77,7 @@ class WindowsTunBackend implements TunnelBackend {
     }
     final readEvent = wintun.getReadWaitEvent(_session);
     _stopEvent = wintun.createStopEvent();
+    _publishPlan();
 
     _reader = WintunReader(
       sessionAddr: _session.address,
@@ -201,11 +212,14 @@ class WindowsTunBackend implements TunnelBackend {
         : _publicResolvers.first;
 
     // 1) Adapter DNS. The adapter is removed on close, so no undo is needed.
-    final setDns = await Process.run('netsh', [
+    final setDns = await _runWithin(_dnsStepLimit, 'netsh', [
       'interface', 'ipv4', 'set', 'dnsservers',
       'name=$_ifName', 'static', dns, 'primary', 'validate=no',
     ]);
-    if (setDns.exitCode != 0) {
+    if (setDns == null) {
+      log.warn('TUN', 'could not set adapter DNS: no answer in '
+          '${_dnsStepLimit.inSeconds}s; going on without it');
+    } else if (setDns.exitCode != 0) {
       log.warn('TUN', 'could not set adapter DNS: ${_msg(setDns).trim()}');
     } else {
       log.debug('TUN', 'adapter DNS => $dns');
@@ -220,7 +234,7 @@ class WindowsTunBackend implements TunnelBackend {
     // killed rather than closed left one behind — and it is still pointing the
     // whole machine at a resolver that went away with that tunnel. Adding a
     // second on top would stack two catch-alls of unclear precedence.
-    await Process.run('powershell', _nrptRemoveArgs);
+    await _runWithin(_nrptStepLimit, 'powershell', _nrptRemoveArgs);
 
     // Public resolvers here, deliberately, even when the server proposed one.
     //
@@ -239,19 +253,49 @@ class WindowsTunBackend implements TunnelBackend {
     //
     // Two of them, so one being blocked (which is the norm on the networks this
     // client exists for) is not the same as having no resolver at all.
+    //
+    // The undo goes in first: an add that ran out of time may still have
+    // landed, and removing a rule that isn't there is harmless.
+    _undo.add(const TeardownCommand(
+        'powershell', _nrptRemoveArgs, 'remove NRPT rule'));
+    _publishPlan();
     final nrptServers = _publicResolvers.map((s) => "'$s'").join(',');
-    final add = await Process.run('powershell', [
+    final add = await _runWithin(_nrptStepLimit, 'powershell', [
       '-NoProfile', '-NonInteractive', '-Command',
       "Add-DnsClientNrptRule -Namespace '.' -NameServers $nrptServers "
           "-Comment '$_nrptTag'",
     ]);
-    if (add.exitCode != 0) {
-      log.warn('TUN', 'could not add NRPT rule: ${_msg(add).trim()}');
+    if (add == null || add.exitCode != 0) {
+      final why = add == null
+          ? 'no answer in ${_nrptStepLimit.inSeconds}s'
+          : _msg(add).trim();
+      log.warn('TUN', 'could not add NRPT rule: $why');
       return;
     }
     log.debug('TUN', 'NRPT catch-all => ${_publicResolvers.join(", ")}');
-    _undo.add(_Undo('powershell', _nrptRemoveArgs, 'remove NRPT rule'));
   }
+
+  /// How long each DNS step may take. DNS is optional, so a step that hangs
+  /// (`netsh` has taken 35s and then failed) must not hold up the connection.
+  static const Duration _dnsStepLimit = Duration(seconds: 5);
+  static const Duration _nrptStepLimit = Duration(seconds: 10);
+
+  /// Runs [exe] and returns its result, or null (after killing it) when it
+  /// takes longer than [limit].
+  Future<ProcessResult?> _runWithin(
+      Duration limit, String exe, List<String> args) async {
+    final p = await Process.start(exe, args);
+    final out = p.stdout.transform(systemEncoding.decoder).join();
+    final err = p.stderr.transform(systemEncoding.decoder).join();
+    final code = await p.exitCode.timeout(limit, onTimeout: () {
+      p.kill();
+      return _timedOut;
+    });
+    if (code == _timedOut) return null;
+    return ProcessResult(p.pid, code, await out, await err);
+  }
+
+  static const int _timedOut = -0x7fffffff;
 
   /// Resolvers that answer from anywhere, tunnel or no tunnel. See [_applyDns]
   /// for why the NRPT rule must not name a tunnel-only address.
@@ -304,14 +348,20 @@ class WindowsTunBackend implements TunnelBackend {
     // Stop the reader (signals the stop event), then end the session so the
     // read event stops firing.
     await _reader?.stop();
+    // Each handle leaves the plan in the same synchronous step that frees it,
+    // so a kill at any await below never leaves a freed handle in the plan.
     final wintun = _wintun;
     if (wintun != null && _session != nullptr) {
-      wintun.endSession(_session);
+      final session = _session;
       _session = nullptr;
+      _publishPlan();
+      wintun.endSession(session);
     }
 
-    // Revert routing/address changes in reverse order; tolerate failures.
-    for (final u in _undo.reversed) {
+    // Revert routing/address changes in reverse order; tolerate failures. A
+    // command leaves the plan only once it has run.
+    while (_undo.isNotEmpty) {
+      final u = _undo.last;
       final r = await Process.run(u.exe, u.args);
       if (r.exitCode != 0) {
         log.debug('TUN',
@@ -319,17 +369,22 @@ class WindowsTunBackend implements TunnelBackend {
       } else {
         log.debug('TUN', 'reverted: ${u.label}');
       }
+      _undo.removeLast();
+      _publishPlan();
     }
-    _undo.clear();
 
     // Removing the adapter drops any remaining routes/addresses bound to it.
     if (wintun != null && _adapter != nullptr) {
-      wintun.closeAdapter(_adapter);
+      final adapter = _adapter;
       _adapter = nullptr;
+      _publishPlan();
+      wintun.closeAdapter(adapter);
     }
     if (wintun != null && _stopEvent != nullptr) {
-      wintun.closeHandle(_stopEvent);
+      final stopEvent = _stopEvent;
       _stopEvent = nullptr;
+      _publishPlan();
+      wintun.closeHandle(stopEvent);
     }
     if (!_inbound.isClosed) await _inbound.close();
     log.info('TUN', 'teardown complete');
@@ -349,8 +404,19 @@ class WindowsTunBackend implements TunnelBackend {
       }
       throw TunnelException('$exe ${args.join(' ')} failed: $err');
     }
-    if (undo != null) _undo.add(_Undo(undo.exe, undo.args, label));
+    if (undo != null) {
+      _undo.add(TeardownCommand(undo.exe, undo.args, label));
+      _publishPlan();
+    }
   }
+
+  void _publishPlan() => onTeardownPlan?.call(TeardownPlan(
+        commands: List.of(_undo),
+        wintunAdapter: _adapter.address,
+        wintunSession: _session.address,
+        wintunStopEvent: _stopEvent.address,
+        wintunDll: dllPath,
+      ));
 
   Future<WindowsDefaultRoute?> _defaultRoute() async {
     final r = await Process.run('route', ['print', '-4']);
@@ -404,13 +470,6 @@ WindowsDefaultRoute? parseWindowsDefaultRoute(String routePrintOutput) {
     }
   }
   return null;
-}
-
-class _Undo {
-  final String exe;
-  final List<String> args;
-  final String label;
-  _Undo(this.exe, this.args, this.label);
 }
 
 class _Cmd {

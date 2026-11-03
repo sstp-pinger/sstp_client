@@ -111,6 +111,10 @@ Future<void> _tunReaderEntry(_ReaderArgs args) async {
             // EOF (e.g. pipe write end closed): stop cleanly.
             break;
           }
+        } else if (revents & (pollerr | pollhup | pollnval) != 0) {
+          // The fd is gone, e.g. closed by a cleanup after the isolate that
+          // owned this reader was killed. Without this the loop would spin.
+          break;
         }
       }
       // Yield so queued control messages ('stop') are processed.

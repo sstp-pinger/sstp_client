@@ -75,4 +75,7 @@ class Libc {
 // Syscall constants used across the TUN backends.
 const int oRdwr = 0x2; // O_RDWR
 const int pollin = 0x001; // POLLIN (same on Linux and Darwin)
+const int pollerr = 0x008; // POLLERR
+const int pollhup = 0x010; // POLLHUP
+const int pollnval = 0x020; // POLLNVAL: the fd was closed under us
 const int eperm = 1; // EPERM
