@@ -456,8 +456,14 @@ final _ipv4 = RegExp(r'^\d{1,3}(\.\d{1,3}){3}$');
 /// Checking the column shape rather than the section header keeps this working
 /// on non-English Windows.
 ///
+/// With several active defaults (more than one network adapter), the one with
+/// the lowest metric wins, as it does for Windows: pinning the server via
+/// another adapter sends the established connection out the wrong way.
+///
 /// Returns null if no default route is present.
 WindowsDefaultRoute? parseWindowsDefaultRoute(String routePrintOutput) {
+  WindowsDefaultRoute? best;
+  var bestMetric = 0;
   for (final raw in routePrintOutput.split('\n')) {
     final tokens = raw.trim().split(RegExp(r'\s+'));
     if (tokens.length >= 4 &&
@@ -466,10 +472,15 @@ WindowsDefaultRoute? parseWindowsDefaultRoute(String routePrintOutput) {
         _ipv4.hasMatch(tokens[2]) && // gateway (excludes "On-link")
         _ipv4.hasMatch(tokens[3])) {
       // interface address (excludes Persistent rows)
-      return WindowsDefaultRoute(tokens[2], tokens[3]);
+      final metric =
+          tokens.length > 4 ? int.tryParse(tokens[4]) ?? 1 << 30 : 1 << 30;
+      if (best == null || metric < bestMetric) {
+        best = WindowsDefaultRoute(tokens[2], tokens[3]);
+        bestMetric = metric;
+      }
     }
   }
-  return null;
+  return best;
 }
 
 class _Cmd {

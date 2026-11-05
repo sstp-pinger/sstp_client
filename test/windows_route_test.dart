@@ -27,15 +27,21 @@ Network Destination        Netmask          Gateway       Interface  Metric
       expect(def.ifaceAddress, '192.168.1.42');
     });
 
-    test('picks the first default row when several exist', () {
+    test('picks the lowest-metric default when several exist', () {
+      // Real host: a stale default listed first on one adapter, while Windows
+      // uses another. Pinning via the first one made every server abort the
+      // call ~10 s after connecting.
       const out = '''
 Active Routes:
 Network Destination        Netmask          Gateway       Interface  Metric
-          0.0.0.0          0.0.0.0       10.0.0.1        10.0.0.5     10
-          0.0.0.0          0.0.0.0      192.168.0.1    192.168.0.9    25
+          0.0.0.0          0.0.0.0      192.168.0.1    192.168.1.136    291
+          0.0.0.0          0.0.0.0      192.168.1.1    192.168.1.136     35
+          0.0.0.0          0.0.0.0      10.255.11.1    10.255.11.249     20
+          0.0.0.0          0.0.0.0      172.16.16.1     172.16.16.23     25
 ''';
       final def = parseWindowsDefaultRoute(out);
-      expect(def!.gateway, '10.0.0.1');
+      expect(def!.gateway, '10.255.11.1');
+      expect(def.ifaceAddress, '10.255.11.249');
     });
 
     test('ignores an On-link default (no real gateway) and returns null', () {
