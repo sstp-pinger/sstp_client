@@ -7,6 +7,7 @@ import 'package:ffi/ffi.dart';
 
 import 'libc.dart';
 import 'linux_dns.dart';
+import 'linux_routes.dart';
 import 'logging.dart';
 import 'teardown_plan.dart';
 import 'tun_reader.dart';
@@ -162,6 +163,7 @@ class LinuxTunBackend implements TunnelBackend {
         undo: ['route', 'del', '$serverIp/32'],
         label: 'pin server $serverIp via ${def.gateway}',
       );
+      await _keepSshClientOutside();
       // Override the default with two /1 routes (does not delete 0.0.0.0/0).
       await _ip(['route', 'replace', '0.0.0.0/1', 'dev', _ifName],
           undo: ['route', 'del', '0.0.0.0/1', 'dev', _ifName],
@@ -317,14 +319,24 @@ class LinuxTunBackend implements TunnelBackend {
         );
     if (line.isEmpty) return null;
     // e.g. "default via 192.168.1.1 dev wlp0s20f3 proto dhcp ..."
-    final tokens = line.split(RegExp(r'\s+'));
-    String? gw, dev;
-    for (var i = 0; i < tokens.length - 1; i++) {
-      if (tokens[i] == 'via') gw = tokens[i + 1];
-      if (tokens[i] == 'dev') dev = tokens[i + 1];
-    }
-    if (gw == null || dev == null) return null;
-    return _DefaultRoute(gw, dev);
+    final route = parseGatewayRoute(line);
+    return route == null ? null : _DefaultRoute(route.gateway, route.dev);
+  }
+
+  /// Run over SSH, keeps the path to the SSH client as it is: the /1 routes
+  /// would send the replies into the tunnel and freeze the session. A client
+  /// on the local subnet needs nothing, its link route is more specific.
+  Future<void> _keepSshClientOutside() async {
+    final client = sshClientAddress(Platform.environment['SSH_CONNECTION']);
+    if (client == null) return;
+    final r = await Process.run('ip', ['-o', 'route', 'get', client]);
+    final route = r.exitCode == 0 ? parseGatewayRoute(r.stdout as String) : null;
+    if (route == null) return;
+    await _ip(
+      ['route', 'replace', '$client/32', 'via', route.gateway, 'dev', route.dev],
+      undo: ['route', 'del', '$client/32'],
+      label: 'keep SSH client $client outside the tunnel',
+    );
   }
 }
 
