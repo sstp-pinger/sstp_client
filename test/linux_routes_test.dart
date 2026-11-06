@@ -24,16 +24,16 @@ void main() {
     });
   });
 
-  group('sshClientAddress', () {
-    test('takes the client from SSH_CONNECTION', () {
-      expect(sshClientAddress('172.16.16.67 51514 172.16.25.5 22'),
-          '172.16.16.67');
+  group('parseRouteSource', () {
+    test('reads the LAN address toward the gateway', () {
+      expect(
+          parseRouteSource(
+              '172.16.25.1 dev ens18 src 172.16.25.5 uid 1000 \\    cache '),
+          '172.16.25.5');
     });
 
-    test('nothing outside SSH, over IPv6 or from this host', () {
-      expect(sshClientAddress(null), isNull);
-      expect(sshClientAddress('fe80::1 51514 fe80::2 22'), isNull);
-      expect(sshClientAddress('127.0.0.1 51514 127.0.0.1 22'), isNull);
+    test('null when ip prints no source', () {
+      expect(parseRouteSource('unreachable 10.0.0.1'), isNull);
     });
   });
 }

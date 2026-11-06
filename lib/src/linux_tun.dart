@@ -163,7 +163,7 @@ class LinuxTunBackend implements TunnelBackend {
         undo: ['route', 'del', '$serverIp/32'],
         label: 'pin server $serverIp via ${def.gateway}',
       );
-      await _keepSshClientOutside();
+      await _keepRepliesOutside(def);
       // Override the default with two /1 routes (does not delete 0.0.0.0/0).
       await _ip(['route', 'replace', '0.0.0.0/1', 'dev', _ifName],
           undo: ['route', 'del', '0.0.0.0/1', 'dev', _ifName],
@@ -323,20 +323,41 @@ class LinuxTunBackend implements TunnelBackend {
     return route == null ? null : _DefaultRoute(route.gateway, route.dev);
   }
 
-  /// Run over SSH, keeps the path to the SSH client as it is: the /1 routes
-  /// would send the replies into the tunnel and freeze the session. A client
-  /// on the local subnet needs nothing, its link route is more specific.
-  Future<void> _keepSshClientOutside() async {
-    final client = sshClientAddress(Platform.environment['SSH_CONNECTION']);
-    if (client == null) return;
-    final r = await Process.run('ip', ['-o', 'route', 'get', client]);
-    final route = r.exitCode == 0 ? parseGatewayRoute(r.stdout as String) : null;
-    if (route == null) return;
+  /// Sends whatever this host sends from its own LAN address back out the
+  /// normal gateway: replies to SSH (the session that started the tunnel, and
+  /// any later one), to proxy-sharing clients, to anything that connected in.
+  /// Without it the /1 routes carry those replies into the tunnel and the
+  /// sessions freeze. Traffic this host starts gets the tunnel's address and
+  /// still goes through the tunnel.
+  Future<void> _keepRepliesOutside(_DefaultRoute def) async {
+    final r = await Process.run('ip', ['-o', 'route', 'get', def.gateway]);
+    final src = r.exitCode == 0 ? parseRouteSource(r.stdout as String) : null;
+    if (src == null) {
+      log.warn('TUN', 'no LAN address found; SSH sessions may freeze');
+      return;
+    }
+    final table = '$replyRoutingTable';
     await _ip(
-      ['route', 'replace', '$client/32', 'via', route.gateway, 'dev', route.dev],
-      undo: ['route', 'del', '$client/32'],
-      label: 'keep SSH client $client outside the tunnel',
+      ['route', 'replace', 'default', 'via', def.gateway, 'dev', def.dev,
+        'table', table],
+      undo: ['route', 'flush', 'table', table],
+      label: 'reply table via ${def.gateway}',
     );
+    final rules = [
+      // First the normal routes, minus the defaults and the tunnel's /1s, so
+      // the local subnet and the server pin still apply...
+      ['from', src, 'lookup', 'main', 'suppress_prefixlength', '1',
+        'priority', '${replyRoutingTable - 1}'],
+      // ...then the old default for everything else.
+      ['from', src, 'table', table, 'priority', table],
+    ];
+    for (final rule in rules) {
+      // A rule left by a session killed before its teardown; ignore "no such".
+      await Process.run('ip', ['rule', 'del', ...rule]);
+      await _ip(['rule', 'add', ...rule],
+          undo: ['rule', 'del', ...rule],
+          label: 'replies from $src skip the tunnel');
+    }
   }
 }
 

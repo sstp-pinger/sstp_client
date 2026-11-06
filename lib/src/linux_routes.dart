@@ -22,13 +22,15 @@ LinuxGatewayRoute? parseGatewayRoute(String line) {
   return LinuxGatewayRoute(gw, dev);
 }
 
-/// The IPv4 address of the SSH client this process runs under, from
-/// `$SSH_CONNECTION` ("client_ip client_port server_ip server_port"). A full
-/// tunnel would otherwise carry the replies to that client and freeze the
-/// session that started it.
-String? sshClientAddress(String? sshConnection) {
-  final first = (sshConnection ?? '').trim().split(' ').first;
-  final ok = RegExp(r'^\d{1,3}(\.\d{1,3}){3}$').hasMatch(first) &&
-      !first.startsWith('127.');
-  return ok ? first : null;
+/// Routing table (and rule priority) for replies sent from the LAN address,
+/// see LinuxTunBackend. Any number no other tool uses; this one and the one
+/// below it are taken.
+const int replyRoutingTable = 7737;
+
+/// The source address in one line of `ip route get`: the LAN address this
+/// host uses toward that destination.
+String? parseRouteSource(String line) {
+  final tokens = line.trim().split(RegExp(r'\s+'));
+  final at = tokens.indexOf('src');
+  return at >= 0 && at + 1 < tokens.length ? tokens[at + 1] : null;
 }
