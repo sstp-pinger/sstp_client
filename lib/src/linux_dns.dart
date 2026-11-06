@@ -7,19 +7,28 @@ library;
 const List<String> linuxTunnelResolvers = ['1.1.1.1', '8.8.8.8'];
 
 /// Non-interactive, so a missing permission is an error to report instead of a
-/// password dialog that blocks the connect.
+/// password dialog that blocks the connect. Older resolvectl (systemd 255, as
+/// on Ubuntu 24.04) rejects it; see [resolvectlLacksNoPrompt].
 const String resolvectlNoPrompt = '--no-ask-password';
 
 /// The `resolvectl` calls that send all DNS through [ifName]. `~.` claims every
 /// domain for the link, without it resolved keeps using the physical one too.
-List<List<String>> resolvectlSteps(String ifName) => [
-      [resolvectlNoPrompt, 'dns', ifName, ...linuxTunnelResolvers],
-      [resolvectlNoPrompt, 'domain', ifName, '~.'],
-      [resolvectlNoPrompt, 'default-route', ifName, 'yes'],
+List<List<String>> resolvectlSteps(String ifName, {bool noPrompt = true}) => [
+      for (final step in [
+        ['dns', ifName, ...linuxTunnelResolvers],
+        ['domain', ifName, '~.'],
+        ['default-route', ifName, 'yes'],
+      ])
+        [if (noPrompt) resolvectlNoPrompt, ...step],
     ];
 
-List<String> resolvectlRevert(String ifName) =>
-    [resolvectlNoPrompt, 'revert', ifName];
+List<String> resolvectlRevert(String ifName, {bool noPrompt = true}) =>
+    [if (noPrompt) resolvectlNoPrompt, 'revert', ifName];
+
+/// Whether `resolvectl` failed only because it does not know
+/// [resolvectlNoPrompt]; the calls are then made again without it.
+bool resolvectlLacksNoPrompt(String error) =>
+    error.contains('unrecognized option') && error.contains(resolvectlNoPrompt);
 
 /// Why DNS is staying outside the tunnel, given what `resolvectl` printed.
 String dnsFailureAdvice(String error) {

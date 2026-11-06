@@ -155,16 +155,18 @@ class LinuxTunBackend implements TunnelBackend {
             'no existing default route found; cannot pin server route');
       }
       log.debug('TUN', 'original default: via ${def.gateway} dev ${def.dev}');
+      // replace, not add: a pin left by a session killed before its teardown
+      // ("File exists") would otherwise fail every later connect to this server.
       await _ip(
-        ['route', 'add', '$serverIp/32', 'via', def.gateway, 'dev', def.dev],
+        ['route', 'replace', '$serverIp/32', 'via', def.gateway, 'dev', def.dev],
         undo: ['route', 'del', '$serverIp/32'],
         label: 'pin server $serverIp via ${def.gateway}',
       );
       // Override the default with two /1 routes (does not delete 0.0.0.0/0).
-      await _ip(['route', 'add', '0.0.0.0/1', 'dev', _ifName],
+      await _ip(['route', 'replace', '0.0.0.0/1', 'dev', _ifName],
           undo: ['route', 'del', '0.0.0.0/1', 'dev', _ifName],
           label: 'default half 0.0.0.0/1 via tunnel');
-      await _ip(['route', 'add', '128.0.0.0/1', 'dev', _ifName],
+      await _ip(['route', 'replace', '128.0.0.0/1', 'dev', _ifName],
           undo: ['route', 'del', '128.0.0.0/1', 'dev', _ifName],
           label: 'default half 128.0.0.0/1 via tunnel');
       await _routeDnsThroughTunnel();
@@ -184,23 +186,32 @@ class LinuxTunBackend implements TunnelBackend {
   /// Points systemd-resolved at the tunnel. Traffic already flows without it,
   /// so a failure is warned about and never ends the connection.
   Future<void> _routeDnsThroughTunnel() async {
-    for (final step in resolvectlSteps(_ifName)) {
-      log.debug('DNS', 'resolvectl ${step.join(' ')}');
+    var noPrompt = true;
+    final steps = resolvectlSteps(_ifName);
+    for (var i = 0; i < steps.length; i++) {
+      log.debug('DNS', 'resolvectl ${steps[i].join(' ')}');
       final ProcessResult r;
       try {
-        r = await Process.run('resolvectl', step);
+        r = await Process.run('resolvectl', steps[i]);
       } on ProcessException {
         log.warn('DNS',
             'DNS is NOT going through the VPN: systemd-resolved is not installed.');
         return;
       }
       if (r.exitCode != 0) {
-        log.warn('DNS', dnsFailureAdvice((r.stderr as String).trim()));
+        final err = (r.stderr as String).trim();
+        if (noPrompt && resolvectlLacksNoPrompt(err)) {
+          noPrompt = false;
+          steps.setAll(0, resolvectlSteps(_ifName, noPrompt: false));
+          i--; // the same step again, without the flag
+          continue;
+        }
+        log.warn('DNS', dnsFailureAdvice(err));
         return;
       }
     }
-    _undo.add(_Undo(resolvectlRevert(_ifName), 'restore DNS',
-        command: 'resolvectl'));
+    _undo.add(_Undo(resolvectlRevert(_ifName, noPrompt: noPrompt),
+        'restore DNS', command: 'resolvectl'));
     _publishPlan();
     log.info('DNS',
         'resolver set to ${linuxTunnelResolvers.join(', ')} via $_ifName');

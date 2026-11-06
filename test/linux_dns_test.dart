@@ -11,6 +11,29 @@ void main() {
         ['--no-ask-password', 'default-route', 'sstp0', 'yes'],
       ]);
     });
+
+    test('drops the flag for a resolvectl that does not know it', () {
+      expect(resolvectlSteps('sstp0', noPrompt: false).first,
+          ['dns', 'sstp0', '1.1.1.1', '8.8.8.8']);
+      expect(resolvectlRevert('sstp0', noPrompt: false), ['revert', 'sstp0']);
+    });
+  });
+
+  group('resolvectlLacksNoPrompt', () {
+    test('spots systemd 255 rejecting the flag', () {
+      // Ubuntu 24.04, verbatim.
+      expect(
+          resolvectlLacksNoPrompt(
+              "resolvectl: unrecognized option '--no-ask-password'"),
+          isTrue);
+    });
+
+    test('other failures are not retried', () {
+      expect(
+          resolvectlLacksNoPrompt(
+              'Failed to set DNS configuration: Access denied'),
+          isFalse);
+    });
   });
 
   group('dnsFailureAdvice', () {
