@@ -41,6 +41,7 @@ void main() {
       final advice = dnsFailureAdvice(
           'Failed to set DNS configuration: Access denied');
       expect(advice, contains('setup_privilege.sh'));
+      expect(advice, contains('sudo'));
     });
 
     test('anything else keeps the reason', () {

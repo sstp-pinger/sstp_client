@@ -38,7 +38,9 @@ String dnsFailureAdvice(String error) {
       e.contains('interactive authentication') ||
       e.contains('not authorized')) {
     return 'DNS is NOT going through the VPN: this user may not change it. '
-        'Run tool/setup_privilege.sh once more, then reconnect.';
+        'Installed from the .deb or Arch package: update to 3.7.2 or newer, '
+        'and over SSH be in the sudo (or wheel) group. Tarball: run '
+        'tool/setup_privilege.sh once more. Then reconnect.';
   }
   return 'DNS is NOT going through the VPN: systemd-resolved refused the '
       'change ($error).';
