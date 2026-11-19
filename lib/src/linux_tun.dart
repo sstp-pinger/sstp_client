@@ -171,7 +171,7 @@ class LinuxTunBackend implements TunnelBackend {
       await _ip(['route', 'replace', '128.0.0.0/1', 'dev', _ifName],
           undo: ['route', 'del', '128.0.0.0/1', 'dev', _ifName],
           label: 'default half 128.0.0.0/1 via tunnel');
-      await _routeDnsThroughTunnel();
+      await _routeDnsThroughTunnel(config.customDns);
     } else {
       if (config.splitCidrs.isEmpty) {
         log.warn('TUN',
@@ -186,10 +186,14 @@ class LinuxTunBackend implements TunnelBackend {
   }
 
   /// Points systemd-resolved at the tunnel. Traffic already flows without it,
-  /// so a failure is warned about and never ends the connection.
-  Future<void> _routeDnsThroughTunnel() async {
+  /// so a failure is warned about and never ends the connection. [customDns],
+  /// when set, always wins over the hardcoded public pair.
+  Future<void> _routeDnsThroughTunnel(String? customDns) async {
+    final resolvers = (customDns != null && customDns.isNotEmpty)
+        ? [customDns]
+        : linuxTunnelResolvers;
     var noPrompt = true;
-    final steps = resolvectlSteps(_ifName);
+    final steps = resolvectlSteps(_ifName, resolvers: resolvers);
     for (var i = 0; i < steps.length; i++) {
       log.debug('DNS', 'resolvectl ${steps[i].join(' ')}');
       final ProcessResult r;
@@ -204,7 +208,10 @@ class LinuxTunBackend implements TunnelBackend {
         final err = (r.stderr as String).trim();
         if (noPrompt && resolvectlLacksNoPrompt(err)) {
           noPrompt = false;
-          steps.setAll(0, resolvectlSteps(_ifName, noPrompt: false));
+          steps.setAll(
+            0,
+            resolvectlSteps(_ifName, resolvers: resolvers, noPrompt: false),
+          );
           i--; // the same step again, without the flag
           continue;
         }
@@ -216,7 +223,7 @@ class LinuxTunBackend implements TunnelBackend {
         'restore DNS', command: 'resolvectl'));
     _publishPlan();
     log.info('DNS',
-        'resolver set to ${linuxTunnelResolvers.join(', ')} via $_ifName');
+        'resolver set to ${resolvers.join(', ')} via $_ifName');
 
     try {
       final warning = dnsBypassWarning(

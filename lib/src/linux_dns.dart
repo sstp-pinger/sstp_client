@@ -13,9 +13,16 @@ const String resolvectlNoPrompt = '--no-ask-password';
 
 /// The `resolvectl` calls that send all DNS through [ifName]. `~.` claims every
 /// domain for the link, without it resolved keeps using the physical one too.
-List<List<String>> resolvectlSteps(String ifName, {bool noPrompt = true}) => [
+/// [resolvers] defaults to the public pair; pass a user's own choice instead
+/// to override it.
+List<List<String>> resolvectlSteps(
+  String ifName, {
+  List<String> resolvers = linuxTunnelResolvers,
+  bool noPrompt = true,
+}) =>
+    [
       for (final step in [
-        ['dns', ifName, ...linuxTunnelResolvers],
+        ['dns', ifName, ...resolvers],
         ['domain', ifName, '~.'],
         ['default-route', ifName, 'yes'],
       ])

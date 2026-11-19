@@ -28,9 +28,14 @@ class TunnelConfig {
 
   /// IPCP-assigned DNS server, if any. The Windows backend applies it (adapter
   /// DNS + an NRPT catch-all) so lookups resolve through the tunnel instead of
-  /// the physical/ISP resolver. Linux ignores it and uses public resolvers
-  /// through the tunnel (see linux_dns.dart); macOS does not apply DNS yet.
+  /// the physical/ISP resolver, when [customDns] is not set. Linux ignores it
+  /// and uses public resolvers through the tunnel unless [customDns] is set
+  /// (see linux_dns.dart); macOS does not apply DNS yet.
   final String? dns;
+
+  /// User-set DNS server, if any — always takes priority over [dns] (the
+  /// server's own proposal) and over the hardcoded public-resolver fallback.
+  final String? customDns;
 
   /// Desired interface name (e.g. "tun0"). The backend may adjust it if taken.
   final String interfaceName;
@@ -42,6 +47,7 @@ class TunnelConfig {
     this.routeMode = RouteMode.full,
     this.splitCidrs = const [],
     this.dns,
+    this.customDns,
     this.interfaceName = 'tun0',
   });
 }

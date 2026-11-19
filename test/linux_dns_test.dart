@@ -12,6 +12,11 @@ void main() {
       ]);
     });
 
+    test('a custom resolver list replaces the public pair', () {
+      final steps = resolvectlSteps('sstp0', resolvers: ['9.9.9.9']);
+      expect(steps.first, ['--no-ask-password', 'dns', 'sstp0', '9.9.9.9']);
+    });
+
     test('drops the flag for a resolvectl that does not know it', () {
       expect(resolvectlSteps('sstp0', noPrompt: false).first,
           ['dns', 'sstp0', '1.1.1.1', '8.8.8.8']);

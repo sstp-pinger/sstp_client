@@ -205,11 +205,14 @@ class WindowsTunBackend implements TunnelBackend {
   /// Name Resolution Policy Table catch-all rule so *every* query is directed at
   /// that resolver and none can leak to — and be poisoned by — the ISP's DNS.
   Future<void> _applyDns(TunnelConfig config) async {
-    // Prefer the IPCP-assigned DNS (reachable through the tunnel); fall back to
-    // a public resolver, which the /1 routes above also send over the tunnel.
-    final dns = (config.dns != null && config.dns!.isNotEmpty)
-        ? config.dns!
-        : _publicResolvers.first;
+    // The user's own choice always wins; then the IPCP-assigned DNS (reachable
+    // through the tunnel); then a public resolver, which the /1 routes above
+    // also send over the tunnel.
+    final dns = (config.customDns != null && config.customDns!.isNotEmpty)
+        ? config.customDns!
+        : (config.dns != null && config.dns!.isNotEmpty)
+            ? config.dns!
+            : _publicResolvers.first;
 
     // 1) Adapter DNS. The adapter is removed on close, so no undo is needed.
     final setDns = await _runWithin(_dnsStepLimit, 'netsh', [
