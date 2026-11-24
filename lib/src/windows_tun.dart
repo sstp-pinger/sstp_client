@@ -44,6 +44,9 @@ class WindowsTunBackend implements TunnelBackend {
   /// the rule we added, without disturbing any the user set themselves.
   static const String _nrptTag = 'sstp-shield-tun';
 
+  /// Scheduled task that removes a leaked NRPT rule at the next boot.
+  static const String _cleanupTask = 'SSTPShieldDnsCleanup';
+
   final _inbound = StreamController<Uint8List>.broadcast();
   WintunReader? _reader;
 
@@ -258,14 +261,32 @@ class WindowsTunBackend implements TunnelBackend {
     // client exists for) is not the same as having no resolver at all.
     //
     // The undo goes in first: an add that ran out of time may still have
-    // landed, and removing a rule that isn't there is harmless.
+    // landed, and removing a rule that isn't there is harmless. LIFO: the rule
+    // goes first, then the boot-time cleanup task that guards it.
+    _undo.add(const TeardownCommand('schtasks',
+        ['/delete', '/tn', _cleanupTask, '/f'], 'remove boot cleanup task'));
     _undo.add(const TeardownCommand(
         'powershell', _nrptRemoveArgs, 'remove NRPT rule'));
     _publishPlan();
     final nrptServers = _publicResolvers.map((s) => "'$s'").join(',');
+    // Even public resolvers are blocked on some networks, so a rule left by a
+    // shutdown or power cut while connected kills all DNS until the app runs
+    // again. The startup task (as SYSTEM, before logon, even on battery)
+    // removes it at the next boot and then deletes itself.
     final add = await _runWithin(_nrptStepLimit, 'powershell', [
       '-NoProfile', '-NonInteractive', '-Command',
-      "Add-DnsClientNrptRule -Namespace '.' -NameServers $nrptServers "
+      'Register-ScheduledTask -TaskName $_cleanupTask -Force '
+          '-Action (New-ScheduledTaskAction -Execute powershell -Argument '
+          "'-NoProfile -NonInteractive -Command Get-DnsClientNrptRule | "
+          "Where-Object Comment -eq ''$_nrptTag'' | "
+          "Remove-DnsClientNrptRule -Force; "
+          "schtasks /delete /tn $_cleanupTask /f') "
+          '-Trigger (New-ScheduledTaskTrigger -AtStartup) '
+          '-Principal (New-ScheduledTaskPrincipal -UserId SYSTEM '
+          '-LogonType ServiceAccount -RunLevel Highest) '
+          '-Settings (New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries '
+          '-DontStopIfGoingOnBatteries) | Out-Null; '
+          "Add-DnsClientNrptRule -Namespace '.' -NameServers $nrptServers "
           "-Comment '$_nrptTag'",
     ]);
     if (add == null || add.exitCode != 0) {
